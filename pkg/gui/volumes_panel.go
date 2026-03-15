@@ -2,6 +2,9 @@ package gui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/jesseduffield/gocui"
@@ -24,6 +27,11 @@ func (gui *Gui) getVolumesPanel() *panels.SideListPanel[*commands.Volume] {
 						Key:    "config",
 						Title:  gui.Tr.ConfigTitle,
 						Render: gui.renderVolumeConfig,
+					},
+					{
+						Key:    "files",
+						Title:  "Files",
+						Render: gui.renderVolumeFiles,
 					},
 				}
 			},
@@ -83,6 +91,83 @@ func (gui *Gui) volumeConfigStr(volume *commands.Volume) string {
 	}
 
 	return output
+}
+
+func (gui *Gui) renderVolumeFiles(volume *commands.Volume) tasks.TaskFunc {
+	return gui.NewSimpleRenderStringTask(func() string { return gui.volumeFilesStr(volume) })
+}
+
+func (gui *Gui) volumeFilesStr(volume *commands.Volume) string {
+	mountpoint := volume.Volume.Mountpoint
+	if mountpoint == "" {
+		return "No mountpoint available for this volume.\n"
+	}
+
+	info, err := os.Stat(mountpoint)
+	if err != nil {
+		if os.IsPermission(err) {
+			return fmt.Sprintf("Permission denied reading %s\nTry running lazydocker with elevated privileges.\n", mountpoint)
+		}
+		return fmt.Sprintf("Error accessing mountpoint: %s\n", err.Error())
+	}
+	if !info.IsDir() {
+		return fmt.Sprintf("Mountpoint %s is not a directory.\n", mountpoint)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(utils.ColoredString(mountpoint, color.FgCyan) + "\n")
+
+	if err := renderDirTree(mountpoint, "", &sb); err != nil {
+		if os.IsPermission(err) {
+			sb.WriteString(utils.ColoredString("[permission denied]", color.FgRed) + "\n")
+		} else {
+			sb.WriteString(utils.ColoredString(fmt.Sprintf("[error: %s]", err.Error()), color.FgRed) + "\n")
+		}
+	}
+
+	return sb.String()
+}
+
+// renderDirTree recursively renders directory entries using box-drawing characters.
+func renderDirTree(dirPath string, prefix string, sb *strings.Builder) error {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return err
+	}
+
+	if len(entries) == 0 {
+		sb.WriteString(prefix + utils.ColoredString("(empty)", color.FgYellow) + "\n")
+		return nil
+	}
+
+	for i, entry := range entries {
+		isLast := i == len(entries)-1
+
+		connector := "├── "
+		childPrefix := prefix + "│   "
+		if isLast {
+			connector = "└── "
+			childPrefix = prefix + "    "
+		}
+
+		name := entry.Name()
+		if entry.IsDir() {
+			sb.WriteString(prefix + connector + utils.ColoredString(name+"/", color.FgBlue) + "\n")
+			if err := renderDirTree(filepath.Join(dirPath, name), childPrefix, sb); err != nil {
+				sb.WriteString(childPrefix + utils.ColoredString("[permission denied]", color.FgRed) + "\n")
+			}
+		} else {
+			info, infoErr := entry.Info()
+			if infoErr == nil {
+				size := utils.ColoredString("("+utils.FormatBinaryBytes(int(info.Size()))+")", color.FgYellow)
+				sb.WriteString(prefix + connector + name + " " + size + "\n")
+			} else {
+				sb.WriteString(prefix + connector + name + "\n")
+			}
+		}
+	}
+
+	return nil
 }
 
 func (gui *Gui) reloadVolumes() error {
